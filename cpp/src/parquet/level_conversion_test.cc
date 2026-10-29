@@ -23,12 +23,16 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "arrow/testing/gtest_compat.h"
 #include "arrow/util/bit_util.h"
 #include "arrow/util/bitmap.h"
+#include "arrow/util/endian.h"
 #include "arrow/util/ubsan.h"
 
 namespace parquet::internal {
@@ -112,6 +116,76 @@ TEST(GreaterThanBitmap, GeneratesExpectedBitmasks) {
             0x8080808080808080);
 }
 #endif
+
+namespace {
+
+// Plain scalar reference for GreaterThanBitmap (same contract: bit x is set iff
+// levels[x] > rhs, bits at and above num_levels are zero, little-endian bit order).
+uint64_t ReferenceGreaterThanBitmap(const int16_t* levels, int64_t num_levels,
+                                    int16_t rhs) {
+  uint64_t mask = 0;
+  for (int64_t x = 0; x < num_levels; ++x) {
+    if (levels[x] > rhs) {
+      mask |= uint64_t{1} << x;
+    }
+  }
+  return ::arrow::bit_util::ToLittleEndian(mask);
+}
+
+}  // namespace
+
+// Cross-checks every batch size in [0, 64] (covering the SIMD lane boundaries and
+// the scalar tail of the vectorized implementations) against the scalar reference.
+TEST(GreaterThanBitmap, MatchesScalarReference) {
+  constexpr int64_t kMaxLevels = 64;
+  // Extra levels after num_levels must never leak into the result.
+  constexpr int64_t kPadding = 16;
+  constexpr int16_t kMin = std::numeric_limits<int16_t>::min();
+  constexpr int16_t kMax = std::numeric_limits<int16_t>::max();
+  const std::vector<int16_t> rhs_values = {kMin, -1, 0, 1, 2, 7, 8, kMax - 1, kMax};
+
+  std::mt19937 rng(/*seed=*/55313);
+  std::uniform_int_distribution<int> full_range(kMin, kMax);
+  std::uniform_int_distribution<int> near_rhs(-2, 2);
+
+  std::vector<int16_t> levels(kMaxLevels + kPadding);
+  auto check = [&](int64_t num_levels, int16_t rhs, const char* pattern) {
+    // Padding is always greater than or equal to any rhs, so an over-read shows up.
+    std::fill(levels.begin() + num_levels, levels.end(), kMax);
+    const uint64_t expected = ReferenceGreaterThanBitmap(levels.data(), num_levels, rhs);
+    EXPECT_EQ(GreaterThanBitmap(levels.data(), num_levels, rhs), expected)
+        << "num_levels=" << num_levels << " rhs=" << rhs << " pattern=" << pattern;
+    // Exactly sized input, so that an over-read is also caught by ASAN builds.
+    const std::vector<int16_t> exact(levels.begin(), levels.begin() + num_levels);
+    EXPECT_EQ(GreaterThanBitmap(exact.data(), num_levels, rhs), expected)
+        << "num_levels=" << num_levels << " rhs=" << rhs << " pattern=" << pattern
+        << " (exactly sized)";
+  };
+
+  for (int64_t num_levels = 0; num_levels <= kMaxLevels; ++num_levels) {
+    for (int16_t rhs : rhs_values) {
+      // None greater: every level equals rhs (the comparison is strict).
+      std::fill(levels.begin(), levels.begin() + num_levels, rhs);
+      check(num_levels, rhs, "all-equal");
+      // All greater (unless rhs is the maximum, where nothing can be greater).
+      std::fill(levels.begin(), levels.begin() + num_levels,
+                static_cast<int16_t>(rhs == kMax ? kMax : rhs + 1));
+      check(num_levels, rhs, "all-greater");
+      // Levels clustered around rhs, so lanes flip individually.
+      for (int64_t x = 0; x < num_levels; ++x) {
+        levels[x] = static_cast<int16_t>(std::clamp(static_cast<int>(rhs) + near_rhs(rng),
+                                                    static_cast<int>(kMin),
+                                                    static_cast<int>(kMax)));
+      }
+      check(num_levels, rhs, "near-rhs");
+      // Uniformly random levels over the whole int16_t range.
+      for (int64_t x = 0; x < num_levels; ++x) {
+        levels[x] = static_cast<int16_t>(full_range(rng));
+      }
+      check(num_levels, rhs, "random");
+    }
+  }
+}
 
 TEST(DefLevelsToBitmap, WithRepetitionLevelFiltersOutEmptyListValues) {
   std::vector<uint8_t> validity_bitmap(/*count*/ 8, 0);

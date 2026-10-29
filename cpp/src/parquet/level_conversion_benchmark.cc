@@ -98,3 +98,26 @@ void BM_FindMinMax(::benchmark::State& state) {
 }
 
 BENCHMARK(BM_FindMinMax)->Arg(7)->Arg(1024)->Arg(2047)->Arg(kLevelCount);
+
+void BM_GreaterThanBitmap(::benchmark::State& state) {
+  const int64_t num_levels = state.range(0);
+  std::vector<int16_t> levels(/*count=*/static_cast<size_t>(num_levels),
+                              kPresentDefLevel);
+  for (size_t x = 0; x < levels.size(); x++) {
+    if (x % 10 == 0) {
+      levels[x] = kMissingDefLevel;
+    }
+  }
+  for (auto _ : state) {
+    uint64_t bitmap =
+        parquet::internal::GreaterThanBitmap(levels.data(), num_levels, kMissingDefLevel);
+    ::benchmark::DoNotOptimize(bitmap);
+  }
+  state.SetItemsProcessed(int64_t(state.iterations()) * num_levels);
+  state.SetBytesProcessed(int64_t(state.iterations()) * num_levels * sizeof(int16_t));
+}
+
+// GreaterThanBitmap is called on batches of at most 64 levels (see
+// DefLevelsBatchToBitmap); 64 is the common case, the others exercise the tail
+// handling of the vectorized implementations.
+BENCHMARK(BM_GreaterThanBitmap)->Arg(1)->Arg(7)->Arg(8)->Arg(47)->Arg(64);

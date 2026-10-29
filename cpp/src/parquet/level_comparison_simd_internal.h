@@ -25,6 +25,7 @@ namespace parquet::internal {
 
 #if defined(ARROW_HAVE_NEON)
 MinMax FindMinMaxNeon(const int16_t* levels, int64_t num_levels);
+uint64_t GreaterThanBitmapNeon(const int16_t* levels, int64_t num_levels, int16_t rhs);
 #endif
 
 #if defined(ARROW_HAVE_SSE4_2) || defined(ARROW_HAVE_RUNTIME_SSE4_2)

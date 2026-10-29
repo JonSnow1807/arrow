@@ -45,6 +45,7 @@ struct GreaterThanDynamicFunction {
   static constexpr auto targets() {
     return std::array{
         ARROW_DISPATCH_TARGET_NONE(&standard::GreaterThanBitmapImpl)  //
+        ARROW_DISPATCH_TARGET_NEON(&GreaterThanBitmapNeon)            //
         ARROW_DISPATCH_TARGET_AVX2(&GreaterThanBitmapAvx2)            //
     };
   }
